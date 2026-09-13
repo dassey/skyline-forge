@@ -59,15 +59,6 @@ export async function suggest(query, opts = {}) {
   const direct = parseLatLon(q);
   if (direct) return [direct];
 
-  if (looksLikeStreetAddress(q)) {
-    try {
-      const exact = await searchNominatim(q, 6, opts.signal);
-      if (exact.length) return exact;
-    } catch (err) {
-      if (err.name === 'AbortError') return [];
-    }
-  }
-
   const key = `photon:${q}:${opts.near ? `${opts.near.lat.toFixed(2)},${opts.near.lon.toFixed(2)}` : ''}`;
   if (cache.has(key)) return cache.get(key);
 

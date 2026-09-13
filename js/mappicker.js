@@ -5,22 +5,20 @@ const L = window.L;
 
 export const BASEMAPS = [
   {
-    id: 'carto-light',
-    label: 'Light',
-    url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
-    attribution:
-      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-    subdomains: 'abcd',
-    maxZoom: 20,
+    id: 'usgs-topo',
+    label: 'Topo',
+    url: 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}',
+    attribution: '<a href="https://www.usgs.gov/the-national-map">USGS The National Map</a>',
+    maxNativeZoom: 16,
+    maxZoom: 19,
   },
   {
-    id: 'carto-dark',
-    label: 'Dark',
-    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-    attribution:
-      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-    subdomains: 'abcd',
-    maxZoom: 20,
+    id: 'usgs-imagery',
+    label: 'Imagery',
+    url: 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryTopo/MapServer/tile/{z}/{y}/{x}',
+    attribution: '<a href="https://www.usgs.gov/the-national-map">USGS The National Map</a>',
+    maxNativeZoom: 16,
+    maxZoom: 19,
   },
   {
     id: 'osm',
@@ -56,7 +54,7 @@ export class MapPicker {
     }).setView([40.7484, -73.9857], 14);
 
     this.tileLayer = null;
-    this.setBasemap('carto-light');
+    this.setBasemap('usgs-topo');
 
     this.maskLayer = L.polygon([WORLD_RING], {
       stroke: false,
@@ -96,6 +94,7 @@ export class MapPicker {
       attribution: def.attribution,
       subdomains: def.subdomains || 'abc',
       maxZoom: def.maxZoom || 19,
+      maxNativeZoom: def.maxNativeZoom,
       detectRetina: true,
     });
     this.tileLayer.addTo(this.map);

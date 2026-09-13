@@ -467,7 +467,8 @@ class App {
         li.querySelector('.r-detail').textContent = item.detail || '';
         li.addEventListener('mousedown', (e) => {
           e.preventDefault();
-          this.gotoPlace(item);
+          if (item.lookup) this.searchAndGo(item.label);
+          else this.gotoPlace(item);
           close();
         });
         li.addEventListener('mouseenter', () => {
@@ -490,18 +491,20 @@ class App {
       controller?.abort();
       const q = input.value.trim();
       if (q.length < 2) return close();
-      const wait = geocode.looksLikeStreetAddress(q) ? 550 : 220;
       timer = setTimeout(async () => {
         controller = new AbortController();
         try {
+          const list = await geocode.suggest(q, {
+            near: this.settings.location,
+            signal: controller.signal,
+          });
           render(
-            await geocode.suggest(q, {
-              near: this.settings.location,
-              signal: controller.signal,
-            })
+            geocode.looksLikeStreetAddress(q)
+              ? [{ lookup: true, label: q, detail: 'Look up this exact address' }, ...list]
+              : list
           );
         } catch { }
-      }, wait);
+      }, 220);
     });
 
     input.addEventListener('keydown', (e) => {
@@ -519,7 +522,8 @@ class App {
       } else if (e.key === 'Enter') {
         e.preventDefault();
         if (items[active]) {
-          this.gotoPlace(items[active]);
+          if (items[active].lookup) this.searchAndGo(items[active].label);
+          else this.gotoPlace(items[active]);
           close();
         } else {
           this.searchAndGo(input.value.trim());

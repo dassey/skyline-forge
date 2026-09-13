@@ -1,8 +1,8 @@
 const VALHALLA = 'https://valhalla1.openstreetmap.de/route';
-const OSRM = 'https://router.project-osrm.org/route/v1';
+const OSRM = 'https://routing.openstreetmap.de';
 
 export const PROFILES = [
-  { id: 'auto', label: 'Drive', valhalla: 'auto', osrm: 'driving' },
+  { id: 'auto', label: 'Drive', valhalla: 'auto', osrm: 'car' },
   { id: 'pedestrian', label: 'Walk', valhalla: 'pedestrian', osrm: 'foot' },
   { id: 'bicycle', label: 'Bike', valhalla: 'bicycle', osrm: 'bike' },
 ];
@@ -84,7 +84,7 @@ async function routeValhalla(waypoints, profile, opts) {
 
 async function routeOsrm(waypoints, profile, opts) {
   const coords = waypoints.map((w) => `${w.lon},${w.lat}`).join(';');
-  const url = `${OSRM}/${profile.osrm}/${coords}?overview=full&geometries=geojson`;
+  const url = `${OSRM}/routed-${profile.osrm}/route/v1/driving/${coords}?overview=full&geometries=geojson`;
   const res = await fetch(url, { signal: opts.signal });
   if (!res.ok) throw new Error(`OSRM ${res.status}`);
   const data = await res.json();
@@ -94,7 +94,7 @@ async function routeOsrm(waypoints, profile, opts) {
     points: r.geometry.coordinates.map(([lon, lat]) => [lat, lon]),
     distance: r.distance,
     duration: r.duration,
-    source: 'OSRM',
+    source: 'OSRM / OSM',
   };
 }
 

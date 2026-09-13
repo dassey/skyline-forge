@@ -178,7 +178,7 @@ async function installStubs(page, osm) {
     });
   });
 
-  await page.route(/basemaps\.cartocdn\.com|tile\.openstreetmap\.org/, (route) =>
+  await page.route(/basemap\.nationalmap\.gov|tile\.openstreetmap\.org/, (route) =>
     route.fulfill({ contentType: 'image/png', body: PIXEL })
   );
 
@@ -294,14 +294,20 @@ async function installStubs(page, osm) {
       },
       { timeout: 20000 }
     ).catch(() => {});
-    ok('an address query is sent to the address geocoder',
-      seen.nominatimSearch > searchesBefore,
+    ok('typing an address does not call Nominatim',
+      seen.nominatimSearch === searchesBefore,
       `${seen.nominatimSearch - searchesBefore} lookups`);
     const firstResult = await page.locator('#search-results li .r-main').first().textContent();
-    ok('the house number itself is offered, not a nearby landmark',
+    ok('the exact address is offered first, not a nearby landmark',
       firstResult.startsWith('742'), `got "${firstResult}"`);
     await page.locator('#search-results li').first().click();
-    await page.waitForTimeout(400);
+    await page.waitForFunction(
+      () => window.skylineForge.settings.nameplate.title.length > 0,
+      { timeout: 20000 }
+    ).catch(() => {});
+    ok('picking it sends one lookup to the address geocoder',
+      seen.nominatimSearch === searchesBefore + 1,
+      `${seen.nominatimSearch - searchesBefore} lookups`);
     const addressPick = await page.evaluate(() => ({
       area: window.skylineForge.settings.size.areaMetres,
       title: window.skylineForge.settings.nameplate.title,

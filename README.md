@@ -8,8 +8,8 @@ Turn any US city, neighbourhood or address into a 3D-printable model, right in t
 - [Overpass API](https://overpass-api.de/) for serving it
 - [Nominatim](https://nominatim.org/) and [Photon](https://photon.komoot.io/) by komoot for address search
 - [Open-Meteo](https://open-meteo.com/) for elevation
-- [OSRM](https://project-osrm.org/) and [Valhalla](https://github.com/valhalla/valhalla) for routing
-- [CARTO](https://carto.com/attributions) for basemap tiles
+- [Valhalla](https://github.com/valhalla/valhalla) and [OSRM](https://project-osrm.org/) for routing, hosted by [FOSSGIS](https://www.fossgis.de/)
+- [USGS The National Map](https://www.usgs.gov/the-national-map) for basemap tiles
 - [three.js](https://threejs.org/) for the 3D viewer
 - [Leaflet](https://leafletjs.com/) for the map picker
 - [earcut](https://github.com/mapbox/earcut), [polygon-clipping](https://github.com/mfogel/polygon-clipping) and [proj4js](https://github.com/proj4js/proj4js) for geometry
