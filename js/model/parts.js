@@ -105,6 +105,17 @@ export const DEFAULT_SETTINGS = {
   },
 
   colors: Object.fromEntries(PARTS.map((p) => [p.id, p.color])),
+
+  // The spools the model is printed with. `colors` above is what each layer
+  // would like to be; this is what it gets once layers share spools.
+  // An empty plan is filled in on first use.
+  printer: 'bambu-x1',
+  filaments: {
+    count: 4,
+    slots: [],
+    assign: {},
+    manual: false,
+  },
 };
 
 export function mergeSettings(base, patch) {

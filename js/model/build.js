@@ -671,10 +671,26 @@ export function buildModel(features, s, ctx = {}) {
   let triangles = 0;
   let volume = 0;
 
+  const footprints = {
+    route: () => G.multiPolygonArea(routeRegion),
+    buildings: () => builtUpArea,
+    rail: () => G.multiPolygonArea(railRegion),
+    roadsMajor: () => G.multiPolygonArea(roadsMajorRegion),
+    roads: () => G.multiPolygonArea(roadsRegion),
+    water: () => G.multiPolygonArea(waterRegion),
+    green: () => G.multiPolygonArea(greenRegion),
+    ground: () => G.multiPolygonArea(groundRegion),
+    frame: () => G.multiPolygonArea(rimMp) + G.multiPolygonArea(plaqueRegion),
+    label: () => G.multiPolygonArea(textMp),
+  };
+  const regionAreas = {};
+  for (const [id, area] of Object.entries(footprints)) regionAreas[id] = area();
+
   for (const def of PARTS) {
     const mesh = meshes.get(def.id);
     if (!mesh || mesh.isEmpty()) continue;
     const vol = mesh.volume();
+    const box = mesh.bounds();
     const finished = mesh.finish();
     triangles += finished.triangleCount;
     volume += Math.abs(vol);
@@ -686,6 +702,9 @@ export function buildModel(features, s, ctx = {}) {
       indices: finished.indices,
       triangleCount: finished.triangleCount,
       volumeMm3: Math.abs(vol),
+      zMin: box.minZ,
+      zMax: box.maxZ,
+      footprintMm2: regionAreas[def.id] || 0,
     });
   }
 
@@ -727,18 +746,7 @@ export function buildModel(features, s, ctx = {}) {
       buildingCount: buildingsPlaced.length,
       plateAreaMm2: G.multiPolygonArea(plateMp),
       builtUpMm2: builtUpArea,
-      regionAreas: {
-        route: G.multiPolygonArea(routeRegion),
-        buildings: builtUpArea,
-        rail: G.multiPolygonArea(railRegion),
-        roadsMajor: G.multiPolygonArea(roadsMajorRegion),
-        roads: G.multiPolygonArea(roadsRegion),
-        water: G.multiPolygonArea(waterRegion),
-        green: G.multiPolygonArea(greenRegion),
-        ground: G.multiPolygonArea(groundRegion),
-        frame: G.multiPolygonArea(rimMp) + G.multiPolygonArea(plaqueRegion),
-        label: G.multiPolygonArea(textMp),
-      },
+      regionAreas,
       scaleDenominator: Math.round(1 / mmPerMetre * 1000),
       mmPerMetre,
       elapsedMs: Date.now() - t0,

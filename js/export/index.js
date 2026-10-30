@@ -6,9 +6,9 @@ import { createZip } from './zip.js';
 export const FORMATS = [
   {
     id: '3mf',
-    label: '3MF — colour',
+    label: '3MF — print-ready colour',
     ext: '3mf',
-    detail: 'One object, one coloured part per layer. Best for multi-material.',
+    detail: 'Opens in Bambu Studio and OrcaSlicer with every part on its filament, centred on your plate.',
   },
   {
     id: 'stl',
@@ -59,11 +59,17 @@ export function buildExport(format, parts, meta = {}) {
       };
 
     case 'stl-parts': {
-      const entries = usable.map((part, i) => ({
-        name: `${String(i + 1).padStart(2, '0')}-${slugify(part.id, part.id)}.stl`,
+      const ordered = usable
+        .map((part, i) => ({ part, i }))
+        .sort((a, b) => (a.part.filament ?? a.i) - (b.part.filament ?? b.i) || a.i - b.i)
+        .map(({ part }) => part);
+      const entries = ordered.map((part, i) => ({
+        name: Number.isInteger(part.filament)
+          ? `filament-${part.filament + 1}-${slugify(part.id, part.id)}.stl`
+          : `${String(i + 1).padStart(2, '0')}-${slugify(part.id, part.id)}.stl`,
         data: new Uint8Array(toStlBuffer([part], `${banner(meta)} | ${part.label}`)),
       }));
-      entries.push({ name: 'README.txt', data: partsReadme(usable, meta) });
+      entries.push({ name: 'README.txt', data: partsReadme(ordered, meta) });
       return {
         blob: createZip(entries),
         filename: `${stem}-parts.zip`,
@@ -88,6 +94,7 @@ export function buildExport(format, parts, meta = {}) {
           title: meta.title || 'Skyline model',
           description: meta.description || '',
           application: 'Skyline Forge',
+          plateCentre: meta.plateCentre,
         }),
         filename: `${stem}.3mf`,
       };
@@ -108,16 +115,30 @@ function partsReadme(parts, meta) {
     'PrusaSlicer / OrcaSlicer / Bambu Studio:',
     '  1. Import the first STL.',
     '  2. Right-click it, "Add part" -> "Load", and add the rest.',
-    '  3. Assign a filament to each part.',
+    '  3. Assign each part the filament number in its file name.',
+    '  (The 3MF export does steps 1-3 for you in Bambu Studio and OrcaSlicer.)',
     '',
     'Cura:',
     '  1. Open all files at once; Cura keeps their shared origin.',
     '  2. Select all, then "Merge models" (Ctrl+Alt+G).',
     '',
     'Single-colour printing: use the merged .stl export instead.',
-    '',
-    'Layers in this bundle:'
+    ''
   );
+  if (parts.every((p) => Number.isInteger(p.filament))) {
+    lines.push('Filaments — load these, then give each file the filament in its name:');
+    const slots = [...new Set(parts.map((p) => p.filament))];
+    for (const slot of slots) {
+      const members = parts.filter((p) => p.filament === slot);
+      const name = meta.filamentNames?.[slot];
+      lines.push(
+        `  Filament ${slot + 1}  ${members[0].color}${name ? `  ${name}` : ''}`,
+        `      ${members.map((p) => p.label).join(', ')}`
+      );
+    }
+    lines.push('');
+  }
+  lines.push('Layers in this bundle:');
   parts.forEach((p, i) => {
     lines.push(
       `  ${String(i + 1).padStart(2, '0')}. ${p.label.padEnd(12)} ${p.color}   ` +

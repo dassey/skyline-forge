@@ -86,10 +86,26 @@
 
     <section class="panel" data-panel="layers" open>
       <button class="panel-head" type="button" aria-expanded="true">
-        <span class="panel-title">Layers &amp; colours</span><span class="chev"></span>
+        <span class="panel-title">Colours &amp; filaments</span><span class="chev"></span>
       </button>
       <div class="panel-body">
+        <label class="field">
+          <span class="field-label">Printer</span>
+          <select id="printer-select" class="select"></select>
+        </label>
+        <div class="field">
+          <span class="field-label">Filaments to print with <output id="filament-count-out"></output></span>
+          <div class="seg seg-count" id="filament-count" role="radiogroup" aria-label="Number of filaments"></div>
+        </div>
+        <p class="hint" id="printer-note"></p>
+
+        <div class="spools" id="spools" role="list" aria-label="Filaments"></div>
+
+        <h4 class="sub">Layers</h4>
         <div class="layer-list" id="layer-list"></div>
+        <p class="hint" id="plan-hint">Each layer prints on one filament. Click a layer's chip to move it to another spool; click a spool above to change its colour.</p>
+
+        <h4 class="sub">Palettes</h4>
         <div class="btn-row">
           <button class="btn tiny" type="button" data-palette="classic">Classic</button>
           <button class="btn tiny" type="button" data-palette="blueprint">Blueprint</button>
@@ -315,9 +331,10 @@
 
     <section class="panel" data-panel="export" open>
       <button class="panel-head" type="button" aria-expanded="true">
-        <span class="panel-title">Export</span><span class="chev"></span>
+        <span class="panel-title">Print &amp; export</span><span class="chev"></span>
       </button>
       <div class="panel-body">
+        <div class="plan-card" id="plan-card" aria-live="polite"></div>
         <div class="format-list" id="format-list" role="radiogroup" aria-label="Export format"></div>
         <button id="export-btn" class="btn primary wide" type="button" disabled>Download</button>
         <div class="btn-row">
@@ -387,11 +404,23 @@
       shrunk to 150 mm. Set <strong>Thinnest street</strong> to your nozzle diameter — 0.4 mm
       nozzles want about 0.85 mm so the slicer can lay down two walls.</p>
 
-      <h3>3. Colours are parts, not paint</h3>
-      <p>Every colour is a separate solid. The plate is carved so no two parts overlap, which
-      means a five-filament print and a single-colour print come from the same geometry. Export
-      <strong>3MF</strong> for multi-material, or the <strong>per-layer STL</strong> bundle to
-      assign filaments manually.</p>
+      <h3>3. Colours are spools, not paint</h3>
+      <p>Every layer is a separate solid, and the plate is carved so no two overlap — so a
+      seven-filament print and a single-colour print come from the same geometry.</p>
+      <p>Pick your <strong>printer</strong> and how many <strong>filaments</strong> you want to
+      print with. The twelve layers are grouped onto that many spools: similar colours and minor
+      layers share first, while neighbours that need contrast — a route and the streets under it,
+      lettering and its plaque — are kept apart. The preview shows the colours you will actually
+      print. Click a layer's chip to move it to another spool, or click a spool to recolour it.</p>
+      <p><strong>Print &amp; export</strong> lists what to load in each slot, how much of each
+      filament the print needs, roughly how many colour changes it makes, and whether it fits
+      your plate.</p>
+      <p>The <strong>3MF</strong> opens in Bambu Studio and OrcaSlicer with every part already on
+      its filament and the model centred on your plate — load the spools in that order and
+      slice. Bambu Studio says it loaded “geometry only”; that is normal for files it did not
+      write, and the filament assignments still come through. PrusaSlicer and Cura open
+      everything on filament 1, so assign parts by hand there, or use the per-layer STL bundle,
+      whose files are named by filament.</p>
 
       <h3>4. When the map data is thin, bring your own</h3>
       <p>OpenStreetMap coverage outside city centres is often machine-traced: every

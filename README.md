@@ -2,6 +2,17 @@
 
 Turn any US city, neighbourhood or address into a 3D-printable model, right in the browser. Search a place, pick a plate shape, choose layers and colours, add a route or your own data, and export 3MF, STL or OBJ.
 
+Pick your printer and how many filaments you have, and the layers are grouped onto that many spools — keeping the contrast that matters, like a route against the streets under it. The preview shows the colours you will actually print, and the 3MF opens in Bambu Studio or OrcaSlicer with every part already on its filament and centred on your plate. The Print & export panel lists what to load in each slot, the grams of each filament, roughly how many colour changes the print makes, and whether it fits the plate.
+
+## Tests
+
+```sh
+npm test               # geometry, imports, filament planning, then a live Overpass smoke test
+npm run test:browser   # the whole app in headless Chromium
+```
+
+The browser test uses a cached OpenStreetMap extract when `npm run test:smoke` has saved one, and a synthetic city otherwise, so it also runs offline.
+
 ## Thanks
 
 - [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors for the map data (ODbL)

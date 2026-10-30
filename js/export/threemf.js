@@ -4,6 +4,7 @@ const CONTENT_TYPES = `<?xml version="1.0" encoding="UTF-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
+  <Default Extension="config" ContentType="application/xml"/>
 </Types>`;
 
 const RELS = `<?xml version="1.0" encoding="UTF-8"?>
@@ -70,6 +71,16 @@ export function to3mf(parts, meta = {}) {
     .map((_, i) => `      <component objectid="${i + 2}"/>`)
     .join('\n');
 
+  // Slicers keep the build transform, so move the model's footprint onto
+  // the middle of the chosen printer's plate and stand it on z = 0.
+  let transform = '';
+  if (meta.plateCentre) {
+    const b = boundsOf(usable);
+    const dx = meta.plateCentre[0] - (b.minX + b.maxX) / 2;
+    const dy = meta.plateCentre[1] - (b.minY + b.maxY) / 2;
+    transform = ` transform="1 0 0 0 1 0 0 0 1 ${fmt(dx)} ${fmt(dy)} ${fmt(-b.minZ)}"`;
+  }
+
   const model = `<?xml version="1.0" encoding="UTF-8"?>
 <model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
   <metadata name="Title">${escapeXml(meta.title || 'Skyline model')}</metadata>
@@ -88,18 +99,60 @@ ${components}
     </object>
   </resources>
   <build>
-    <item objectid="${assemblyId}"/>
+    <item objectid="${assemblyId}"${transform}/>
   </build>
 </model>`;
 
-  return createZip(
-    [
-      { name: '[Content_Types].xml', data: CONTENT_TYPES },
-      { name: '_rels/.rels', data: RELS },
-      { name: '3D/3dmodel.model', data: model },
-    ],
-    'model/3mf'
-  );
+  const entries = [
+    { name: '[Content_Types].xml', data: CONTENT_TYPES },
+    { name: '_rels/.rels', data: RELS },
+    { name: '3D/3dmodel.model', data: model },
+  ];
+  if (usable.some((p) => Number.isInteger(p.filament))) {
+    entries.push({
+      name: 'Metadata/model_settings.config',
+      data: modelSettings(usable, assemblyId, meta.title || 'Skyline model'),
+    });
+  }
+  return createZip(entries, 'model/3mf');
+}
+
+// Bambu Studio and OrcaSlicer read per-part filament numbers from this file,
+// so each layer opens already assigned to its spool. Other slicers ignore it.
+function modelSettings(parts, assemblyId, title) {
+  const extruder = (p) => (Number.isInteger(p.filament) ? p.filament : 0) + 1;
+  const lines = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<config>',
+    `  <object id="${assemblyId}">`,
+    `    <metadata key="name" value="${escapeXml(title)}"/>`,
+    `    <metadata key="extruder" value="${extruder(parts[0])}"/>`,
+  ];
+  parts.forEach((part, index) => {
+    lines.push(
+      `    <part id="${index + 2}" subtype="normal_part">`,
+      `      <metadata key="name" value="${escapeXml(part.label || part.id)}"/>`,
+      `      <metadata key="extruder" value="${extruder(part)}"/>`,
+      '    </part>'
+    );
+  });
+  lines.push('  </object>', '</config>', '');
+  return lines.join('\n');
+}
+
+function boundsOf(parts) {
+  const b = { minX: Infinity, minY: Infinity, minZ: Infinity, maxX: -Infinity, maxY: -Infinity };
+  for (const part of parts) {
+    const pos = part.positions;
+    for (let i = 0; i < pos.length; i += 3) {
+      if (pos[i] < b.minX) b.minX = pos[i];
+      if (pos[i] > b.maxX) b.maxX = pos[i];
+      if (pos[i + 1] < b.minY) b.minY = pos[i + 1];
+      if (pos[i + 1] > b.maxY) b.maxY = pos[i + 1];
+      if (pos[i + 2] < b.minZ) b.minZ = pos[i + 2];
+    }
+  }
+  return b;
 }
 
 function fmt(v) {

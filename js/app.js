@@ -10,8 +10,14 @@ import * as routing from './data/route.js';
 import { FORMATS, buildExport, downloadBlob, slugify } from './export/index.js';
 import { ImportsPanel } from './imports-ui.js';
 import { applyImports } from './data/import/merge.js';
+import {
+  PRINTERS, printerById, planFilaments, sanitizePlan, tidyPlan, compactPlan, colorName,
+  filamentUsage, estimateChanges, bedFit, fitPrintSize, gramsOf, isLight, MAX_FILAMENTS, LAYER_HEIGHT_MM,
+} from './model/filaments.js';
 
 const STORAGE_KEY = 'skyline-forge/settings/v1';
+const PRINTER_KEY = 'skyline-forge/printer';
+const COUNT_CHOICES = [1, 2, 3, 4, 5, 6, 7, 8, MAX_FILAMENTS];
 const DATA_LAYERS = ['buildings', 'roads', 'rail', 'water', 'green'];
 
 const PALETTES = {
@@ -63,6 +69,7 @@ class App {
     this.bindControls();
     this.bindActions();
     this.initImports();
+    this.replan();
     this.syncUi();
 
     this.loadFont();
@@ -70,18 +77,34 @@ class App {
   }
 
   loadSettings() {
-    const fromHash = this.readHash();
-    if (fromHash) return mergeSettings(defaultSettings(), fromHash);
+    let patch = this.readHash();
+    const fromHash = Boolean(patch);
+    if (!patch) {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (raw) patch = JSON.parse(raw);
+      } catch { }
+    }
+    const settings = mergeSettings(defaultSettings(), patch);
+
+    // Links and saves from before spools existed showed every layer in its
+    // own colour; keep that look rather than regrouping it.
+    if (patch && !patch.filaments) settings.filaments.count = MAX_FILAMENTS;
+
+    // The printer belongs to this device, not to whoever shared the link.
+    let printer = null;
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) return mergeSettings(defaultSettings(), JSON.parse(raw));
+      printer = localStorage.getItem(PRINTER_KEY);
     } catch { }
-    return defaultSettings();
+    if (printer && (fromHash || !patch?.printer)) settings.printer = printer;
+    settings.printer = printerById(settings.printer).id;
+    return settings;
   }
 
   saveSettings() {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(this.settings));
+      localStorage.setItem(PRINTER_KEY, this.settings.printer);
     } catch { }
   }
 
@@ -150,35 +173,73 @@ class App {
       const toggleKey = layerToggleKey(part.id);
       const row = document.createElement('div');
       row.className = 'layer-row';
+      row.dataset.part = part.id;
       row.innerHTML = `
         <input type="checkbox" ${toggleKey ? '' : 'disabled title="Always present"'} aria-label="${part.label}">
-        <label class="swatch" title="${part.hint}"><input type="color"></label>
-        <span class="layer-name">${part.label}</span>
+        <button type="button" class="slot-chip" aria-haspopup="menu"><span></span></button>
+        <span class="layer-name" title="${part.hint}">${part.label}</span>
         <span class="layer-count"></span>`;
 
-      const [check, swatchLabel] = row.children;
-      const colorInput = swatchLabel.querySelector('input');
+      const [check, chip] = row.children;
 
       if (toggleKey) {
         check.addEventListener('change', () => {
           this.settings.layers[toggleKey] = check.checked;
           this.syncUi();
+          this.replan();
           this.onChange(toggleKey === 'trees' ? 'data' : 'geometry');
         });
       } else {
         check.checked = true;
       }
 
-      colorInput.addEventListener('input', () => {
-        this.settings.colors[part.id] = colorInput.value;
-        swatchLabel.style.background = colorInput.value;
-        this.viewer.setPartColor(part.id, colorInput.value);
-        this.saveSettings();
+      chip.addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.openSlotMenu(part.id, chip);
       });
+      this.hoverHighlights(row, () => [part.id]);
 
       list.appendChild(row);
-      this.layerRows.set(part.id, { row, check, colorInput, swatchLabel, toggleKey });
+      this.layerRows.set(part.id, { row, check, chip, toggleKey });
     }
+
+    const printerSelect = this.el['printer-select'];
+    printerSelect.innerHTML = '';
+    for (const p of PRINTERS) {
+      const o = document.createElement('option');
+      o.value = p.id;
+      o.textContent = p.label;
+      printerSelect.appendChild(o);
+    }
+    printerSelect.addEventListener('change', () => this.setPrinter(printerSelect.value));
+
+    const countSeg = this.el['filament-count'];
+    countSeg.innerHTML = '';
+    for (const n of COUNT_CHOICES) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.role = 'radio';
+      b.dataset.count = String(n);
+      b.textContent = n === MAX_FILAMENTS ? 'All' : String(n);
+      b.title = n === MAX_FILAMENTS
+        ? 'One filament per colour'
+        : `Group the layers onto ${n} filament${n === 1 ? '' : 's'}`;
+      b.addEventListener('click', () => this.setFilamentCount(n));
+      countSeg.appendChild(b);
+    }
+
+    // The chip's own click toggles the menu, so a press on it is not an
+    // outside press.
+    document.addEventListener('pointerdown', (e) => {
+      if (!this._slotMenu) return;
+      if (this._slotMenu.contains(e.target) || this._slotAnchor?.contains(e.target)) return;
+      this.closeSlotMenu();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && this._slotMenu) this.closeSlotMenu({ refocus: true });
+    });
+    this.el.sidebar.addEventListener('scroll', () => this.closeSlotMenu(), { passive: true });
+    window.addEventListener('resize', () => this.closeSlotMenu());
 
     for (const btn of document.querySelectorAll('[data-palette]')) {
       btn.addEventListener('click', () => this.applyPalette(btn.dataset.palette));
@@ -934,6 +995,7 @@ class App {
     this.el['viewport-empty'].hidden = true;
     this.el['export-btn'].disabled = !msg.result.parts.length;
 
+    this.replan();
     this.applyLayerVisibility();
     this.renderStats(msg.result);
     this.setBusy(false);
@@ -967,8 +1029,7 @@ class App {
 
   renderStats(result) {
     const { stats } = result;
-    const cm3 = stats.volumeMm3 / 1000;
-    const grams = cm3 * 1.24 * 0.55;
+    const grams = this.visibleParts().reduce((sum, p) => sum + gramsOf(p), 0);
     this.el['status-stats'].innerHTML = [
       `<span class="s-dims"><b>${stats.widthMm.toFixed(0)}</b>×<b>${stats.depthMm.toFixed(0)}</b>×<b>${stats.heightMm.toFixed(1)}</b> mm</span>`,
       `<span class="s-scale">1:<b>${stats.scaleDenominator.toLocaleString()}</b></span>`,
@@ -984,24 +1045,54 @@ class App {
     }
   }
 
-  doExport() {
-    if (!this.model?.parts.length) return;
-    const visible = this.model.parts.filter((p) => {
+  visibleParts() {
+    if (!this.model) return [];
+    return this.model.parts.filter((p) => {
       const key = layerToggleKey(p.id);
       return key ? this.settings.layers[key] !== false : true;
     });
-    if (!visible.length) return this.toast('Every layer is switched off.', 'warn');
+  }
+
+  // The plan as the slicer will see it: only the parts being exported, each
+  // stamped with its spool's colour and number.
+  printJob() {
+    const parts = this.visibleParts();
+    const plan = compactPlan(this.settings.filaments, parts.map((p) => p.id));
+    return {
+      plan,
+      parts: parts.map((p) => ({
+        ...p,
+        color: plan.slots[plan.assign[p.id]],
+        filament: plan.assign[p.id],
+      })),
+    };
+  }
+
+  doExport() {
+    if (!this.model?.parts.length) return;
+    const { parts, plan } = this.printJob();
+    if (!parts.length) return this.toast('Every layer is switched off.', 'warn');
 
     try {
       const { lat, lon } = this.settings.location;
-      const { blob, filename } = buildExport(this.exportFormat, visible, {
+      const printer = printerById(this.settings.printer);
+      const { blob, filename } = buildExport(this.exportFormat, parts, {
         title: this.settings.nameplate.title || this.settings.location.label,
         coords: geocode.formatCoords(lat, lon),
         scale: `1:${this.model.stats.scaleDenominator.toLocaleString()}`,
         description: `${this.settings.size.areaMetres.toFixed(0)} m across, printed at ${this.settings.size.printMm} mm. Map data © OpenStreetMap contributors.`,
+        plateCentre: printer.centre,
+        filamentNames: plan.slots.map(colorName),
       });
       downloadBlob(blob, filename);
-      this.toast(`Saved ${filename} (${formatBytes(blob.size)}).`, 'good');
+      const spools = plan.slots.length;
+      this.toast(
+        `Saved ${filename} (${formatBytes(blob.size)}). ` +
+          (this.exportFormat === '3mf' && spools > 1
+            ? `Load ${spools} filaments in the order shown under Print & export.`
+            : ''),
+        'good'
+      );
     } catch (err) {
       this.toast(err.message, 'bad');
     }
@@ -1029,15 +1120,331 @@ class App {
     for (const part of PARTS) {
       this.settings.colors[part.id] = preset[part.id] || part.color;
     }
+    this.replan({ fresh: true });
     this.syncUi();
-    for (const part of PARTS) this.viewer.setPartColor(part.id, this.settings.colors[part.id]);
     this.saveSettings();
+  }
+
+  // Which layers are actually on the plate. Spools are only spent on these;
+  // the rest ride along on the nearest colour until they appear.
+  activeParts() {
+    const on = (id) => {
+      const key = layerToggleKey(id);
+      return key ? this.settings.layers[key] !== false : true;
+    };
+    if (this.model) return this.model.parts.map((p) => p.id).filter(on);
+    return PARTS.map((p) => p.id).filter((id) => on(id) && id !== 'route' && id !== 'trees');
+  }
+
+  // Regroup the layers onto spools. Hand-edited plans are only tidied, so
+  // moving a layer by hand sticks until the count or palette changes.
+  replan({ fresh = false } = {}) {
+    const f = this.settings.filaments;
+    if (fresh) f.manual = false;
+    const active = this.activeParts();
+    const next = f.manual && f.slots.length
+      ? tidyPlan(sanitizePlan(f), active, this.settings.colors)
+      : planFilaments({ colors: this.settings.colors, active, count: f.count });
+    f.slots = next.slots;
+    f.assign = next.assign;
+    this.applyPlanColors();
+    this.renderFilaments();
+    this.renderPlan();
+  }
+
+  slotColor(partId) {
+    const f = this.settings.filaments;
+    return f.slots[f.assign[partId]] || this.settings.colors[partId];
+  }
+
+  applyPlanColors() {
+    for (const part of PARTS) this.viewer.setPartColor(part.id, this.slotColor(part.id));
+  }
+
+  setFilamentCount(n) {
+    this.settings.filaments.count = n;
+    this.replan({ fresh: true });
+    this.saveSettings();
+  }
+
+  setPrinter(id) {
+    const printer = printerById(id);
+    this.settings.printer = printer.id;
+    this.settings.filaments.count = printer.filaments;
+    if (printer.filaments === 1 && this.exportFormat === '3mf') this.exportFormat = 'stl';
+    if (printer.filaments > 1 && this.exportFormat === 'stl') this.exportFormat = '3mf';
+    this.replan({ fresh: true });
+    this.syncUi();
+    this.saveSettings();
+    const n = this.settings.filaments.slots.length;
+    this.toast(`Planned for the ${printer.label}: ${n} filament${n === 1 ? '' : 's'}.`, 'good');
+  }
+
+  setSlotColor(slot, color) {
+    const f = this.settings.filaments;
+    f.slots[slot] = color;
+    for (const part of PARTS) {
+      if (f.assign[part.id] === slot) this.settings.colors[part.id] = color;
+    }
+    this.applyPlanColors();
+    this.renderFilaments();
+    this.renderPlan();
+    this.saveSettings();
+  }
+
+  moveToSlot(partId, slot) {
+    const f = this.settings.filaments;
+    if (slot === 'new') {
+      f.slots.push(this.settings.colors[partId]);
+      slot = f.slots.length - 1;
+    }
+    f.assign[partId] = slot;
+    f.manual = true;
+    this.replan();
+    this.saveSettings();
+  }
+
+  openSlotMenu(partId, anchor) {
+    const reopen = this._slotMenu?.dataset.part === partId;
+    this.closeSlotMenu();
+    if (reopen) return;
+
+    const f = this.settings.filaments;
+    const part = PARTS.find((p) => p.id === partId);
+    const menu = document.createElement('div');
+    menu.className = 'slot-menu';
+    menu.role = 'menu';
+    menu.dataset.part = partId;
+    menu.innerHTML = `<div class="slot-menu-head">${part.label} prints with</div>`;
+
+    f.slots.forEach((color, slot) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.role = 'menuitemradio';
+      b.setAttribute('aria-checked', String(f.assign[partId] === slot));
+      b.innerHTML = `<span class="slot-dot"></span><span class="slot-label"></span>`;
+      b.querySelector('.slot-dot').style.background = color;
+      b.querySelector('.slot-label').textContent = `Filament ${slot + 1} · ${colorName(color)}`;
+      b.addEventListener('click', () => {
+        this.closeSlotMenu();
+        this.moveToSlot(partId, slot);
+      });
+      menu.appendChild(b);
+    });
+
+    if (f.slots.length < MAX_FILAMENTS) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.role = 'menuitem';
+      b.className = 'slot-new';
+      b.innerHTML = `<span class="slot-dot"></span><span class="slot-label">New filament</span>`;
+      b.querySelector('.slot-dot').style.background = this.settings.colors[partId];
+      b.addEventListener('click', () => {
+        this.closeSlotMenu();
+        this.moveToSlot(partId, 'new');
+      });
+      menu.appendChild(b);
+    }
+
+    document.body.appendChild(menu);
+    const r = anchor.getBoundingClientRect();
+    const h = menu.offsetHeight;
+    const below = r.bottom + 6 + h < window.innerHeight;
+    menu.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8))}px`;
+    menu.style.top = `${below ? r.bottom + 6 : Math.max(8, r.top - h - 6)}px`;
+    anchor.setAttribute('aria-expanded', 'true');
+    this._slotMenu = menu;
+    this._slotAnchor = anchor;
+    menu.querySelector('[aria-checked="true"]')?.focus();
+  }
+
+  closeSlotMenu({ refocus = false } = {}) {
+    if (!this._slotMenu) return;
+    const anchor = this._slotAnchor;
+    this._slotMenu.remove();
+    anchor?.setAttribute('aria-expanded', 'false');
+    this._slotMenu = null;
+    this._slotAnchor = null;
+    if (refocus) anchor?.focus();
+  }
+
+  highlight(partIds) {
+    this.viewer.highlightParts(partIds);
+  }
+
+  // Pointing at a spool or layer fades everything else in the 3D view.
+  // Mouse only: on touch a tap would leave the model faded.
+  hoverHighlights(el, ids) {
+    el.addEventListener('pointerenter', (e) => {
+      if (e.pointerType === 'mouse') this.highlight(ids());
+    });
+    el.addEventListener('pointerleave', (e) => {
+      if (e.pointerType === 'mouse') this.highlight(null);
+    });
+  }
+
+  renderFilaments() {
+    const f = this.settings.filaments;
+    const printer = printerById(this.settings.printer);
+    const active = this.activeParts();
+
+    this.el['printer-select'].value = printer.id;
+    for (const btn of this.el['filament-count'].children) {
+      btn.setAttribute('aria-checked', String(!f.manual && Number(btn.dataset.count) === f.count));
+    }
+    this.el['filament-count-out'].textContent =
+      `${f.slots.length} in use${f.manual ? ' · arranged by hand' : ''}`;
+
+    const note = this.el['printer-note'];
+    const over = f.slots.length > printer.filaments;
+    note.textContent = over
+      ? `${f.slots.length} filaments is more than the ${printer.filaments} the ${printer.label} is set up for.`
+      : printer.note;
+    note.classList.toggle('is-warn', over);
+
+    const spools = this.el.spools;
+    if (spools.children.length !== f.slots.length) {
+      spools.innerHTML = '';
+      f.slots.forEach((color, slot) => {
+        const el = document.createElement('div');
+        el.className = 'spool';
+        el.role = 'listitem';
+        el.innerHTML = `
+          <label class="spool-swatch">
+            <span class="spool-num">${slot + 1}</span>
+            <input type="color" aria-label="Filament ${slot + 1} colour">
+          </label>
+          <span class="spool-name"></span>`;
+        const input = el.querySelector('input');
+        input.addEventListener('input', () => this.setSlotColor(slot, input.value));
+        const members = () => {
+          const plan = this.settings.filaments;
+          return PARTS.map((p) => p.id).filter((id) => plan.assign[id] === slot);
+        };
+        this.hoverHighlights(el, members);
+        input.addEventListener('focus', () => this.highlight(members()));
+        input.addEventListener('blur', () => this.highlight(null));
+        spools.appendChild(el);
+      });
+    }
+    [...spools.children].forEach((el, slot) => {
+      const color = f.slots[slot];
+      const swatch = el.querySelector('.spool-swatch');
+      swatch.style.background = color;
+      swatch.classList.toggle('is-light', isLight(color));
+      const input = el.querySelector('input');
+      if (document.activeElement !== input) input.value = color;
+      const names = PARTS.filter((p) => f.assign[p.id] === slot && active.includes(p.id)).map((p) => p.label);
+      swatch.title = `Filament ${slot + 1} · ${colorName(color)}\n${names.join(', ')}\nClick to change the colour`;
+      el.querySelector('.spool-name').textContent = colorName(color);
+    });
+
+    for (const [id, ui] of this.layerRows) {
+      const slot = f.assign[id] ?? 0;
+      const color = f.slots[slot] || this.settings.colors[id];
+      ui.chip.style.background = color;
+      ui.chip.classList.toggle('is-light', isLight(color));
+      ui.chip.firstElementChild.textContent = String(slot + 1);
+      const label = PARTS.find((p) => p.id === id).label;
+      ui.chip.setAttribute('aria-label', `${label}: filament ${slot + 1}, ${colorName(color)}. Change filament`);
+      ui.chip.title = `Filament ${slot + 1} · ${colorName(color)}`;
+    }
+  }
+
+  renderPlan() {
+    const card = this.el['plan-card'];
+    if (!card) return;
+    if (!this.model?.parts.length) {
+      card.innerHTML = '<p class="plan-empty">Generate the model to see which filaments to load.</p>';
+      return;
+    }
+    const { parts, plan } = this.printJob();
+    if (!parts.length) {
+      card.innerHTML = '<p class="plan-empty">Every layer is switched off.</p>';
+      return;
+    }
+
+    const printer = printerById(this.settings.printer);
+    const usage = filamentUsage(parts, plan);
+    const total = usage.reduce((a, u) => a + u.grams, 0);
+    const changes = estimateChanges(parts, plan);
+    const { widthMm, depthMm } = this.model.stats;
+    const fit = bedFit(widthMm, depthMm, printer);
+
+    card.innerHTML = `
+      <div class="plan-head">
+        <span>Load ${plan.slots.length === 1 ? 'this filament' : 'these filaments'}</span>
+        <span class="plan-total">≈ ${total.toFixed(0)} g</span>
+      </div>
+      <ol class="plan-list"></ol>
+      <p class="plan-line plan-changes"></p>
+      <p class="plan-line plan-fit"></p>`;
+
+    const list = card.querySelector('.plan-list');
+    for (const u of usage) {
+      const li = document.createElement('li');
+      li.innerHTML = `
+        <span class="plan-chip"></span>
+        <span class="plan-what"><b></b><small></small></span>
+        <span class="plan-g"></span>`;
+      const chip = li.querySelector('.plan-chip');
+      chip.textContent = String(u.slot + 1);
+      chip.style.background = u.color;
+      chip.classList.toggle('is-light', isLight(u.color));
+      li.querySelector('b').textContent = colorName(u.color);
+      li.querySelector('small').textContent = u.parts.map((p) => p.label).join(' · ');
+      li.querySelector('.plan-g').textContent = `${Math.max(1, Math.round(u.grams))} g`;
+      const ids = u.parts.map((p) => p.id);
+      this.hoverHighlights(li, () => ids);
+      list.appendChild(li);
+    }
+
+    card.querySelector('.plan-changes').textContent = plan.slots.length > 1
+      ? `≈ ${changes.toLocaleString()} colour changes at ${LAYER_HEIGHT_MM} mm layers`
+      : 'No colour changes — a single-filament print.';
+
+    const fitLine = card.querySelector('.plan-fit');
+    const size = `${widthMm.toFixed(0)} × ${depthMm.toFixed(0)} mm`;
+    fitLine.classList.add(fit.fits ? 'is-good' : 'is-warn');
+    if (fit.fits) {
+      fitLine.textContent =
+        `${size} fits the ${printer.label} plate${fit.turned ? ' turned 90°' : ''}.`;
+    } else {
+      fitLine.textContent = `${size} is too big for the ${printer.label} plate ` +
+        `(${printer.bed[0]} × ${printer.bed[1]} mm). `;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn tiny';
+      btn.id = 'fit-plate-btn';
+      btn.textContent = 'Shrink to fit';
+      btn.addEventListener('click', () => this.fitToPlate());
+      fitLine.appendChild(btn);
+    }
+  }
+
+  fitToPlate() {
+    if (!this.model) return;
+    const printer = printerById(this.settings.printer);
+    const s = this.settings;
+    const { widthMm, depthMm } = this.model.stats;
+    const hasBar = s.layers.nameplate && (s.nameplate.title || s.nameplate.subtitle);
+    const next = clamp(fitPrintSize({
+      printMm: s.size.printMm, widthMm, depthMm, fixedDepthMm: hasBar ? s.nameplate.barMm : 0,
+    }, printer), 40, 350);
+    this.settings.size.printMm = next;
+    this.syncUi();
+    this.onChange('geometry');
+    this.toast(`Printed size set to ${next} mm to fit the ${printer.label}.`, 'good');
   }
 
   reset() {
     const keep = { ...this.settings.location };
+    const printer = this.settings.printer;
     this.settings = defaultSettings();
     this.settings.location = keep;
+    this.settings.printer = printer;
+    this.settings.filaments.count = printerById(printer).filaments;
+    this.replan({ fresh: true });
     history.replaceState(null, '', location.pathname);
     this.picker.update(this.settings);
     this.picker.clearWaypoints();
@@ -1059,12 +1466,10 @@ class App {
       btn.setAttribute('aria-checked', String(btn.dataset.format === this.exportFormat));
     }
 
-    for (const [id, ui] of this.layerRows) {
-      const color = this.settings.colors[id] || PARTS.find((p) => p.id === id).color;
-      ui.colorInput.value = color;
-      ui.swatchLabel.style.background = color;
+    for (const [, ui] of this.layerRows) {
       if (ui.toggleKey) ui.check.checked = Boolean(this.settings.layers[ui.toggleKey]);
     }
+    this.renderFilaments();
 
     this.el['building-parts'].checked = this.settings.print.buildingDetail === 'parts';
     this.syncOutputs();

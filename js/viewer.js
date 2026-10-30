@@ -142,6 +142,20 @@ export class Viewer {
     if (mesh) mesh.material.color.set(color);
   }
 
+  // Fade every part except `ids` so a spool's layers stand out; null
+  // restores the whole model.
+  highlightParts(ids) {
+    for (const [id, mesh] of this.parts) {
+      const dim = Boolean(ids) && !ids.includes(id);
+      if (mesh.material.transparent === dim) continue;
+      mesh.material.transparent = dim;
+      mesh.material.opacity = dim ? 0.12 : 1;
+      mesh.material.depthWrite = !dim;
+      mesh.castShadow = !dim;
+      mesh.material.needsUpdate = true;
+    }
+  }
+
   setPartVisible(id, visible) {
     const mesh = this.parts.get(id);
     if (mesh) mesh.visible = visible;

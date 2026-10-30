@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import { readFile, mkdir, readdir } from 'node:fs/promises';
 import { extname, join, normalize, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { syntheticCity } from './fixture-city.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
@@ -190,13 +191,14 @@ async function installStubs(page, osm) {
   console.log('============================\n');
 
   let osm;
+  let source = 'cached OSM extract';
   try {
     osm = JSON.parse(await readFile(join(CACHE, 'osm-manhattan-midtown.json'), 'utf8'));
   } catch {
-    console.log('  ! No fixture found. Run `node test/smoke.mjs` first to populate test/.cache.');
-    process.exit(1);
+    osm = syntheticCity({ lat: FIXTURE.lat, lon: FIXTURE.lon });
+    source = 'synthetic city — run `node test/smoke.mjs` to cache real OSM data';
   }
-  console.log(`Fixture: ${osm.elements.length.toLocaleString()} OSM elements\n`);
+  console.log(`Fixture: ${osm.elements.length.toLocaleString()} OSM elements (${source})\n`);
 
   await mkdir(SHOTS, { recursive: true });
   const server = await serve();
@@ -363,6 +365,136 @@ async function installStubs(page, osm) {
     ok('a palette repaints without rebuilding', painted === '#12395c', `ground is ${painted}`);
     await page.click('[data-palette="classic"]');
 
+    console.log('\nFilaments');
+    const meshColours = () => page.evaluate(() => {
+      const out = {};
+      for (const [id, mesh] of window.skylineForge.viewer.parts) {
+        out[id] = `#${mesh.material.color.getHexString()}`;
+      }
+      return out;
+    });
+    const planState = () => page.evaluate(() => {
+      const f = window.skylineForge.settings.filaments;
+      return {
+        slots: f.slots.slice(), assign: { ...f.assign }, manual: f.manual, count: f.count,
+        spools: document.querySelectorAll('.spool').length,
+        planRows: document.querySelectorAll('.plan-list li').length,
+        card: document.getElementById('plan-card').textContent,
+      };
+    });
+
+    let plan = await planState();
+    ok('a new visitor plans for one AMS', plan.count === 4 && plan.slots.length <= 4,
+      `${plan.slots.length} of ${plan.count}`);
+    ok('one spool chip per filament', plan.spools === plan.slots.length);
+    ok('the print plan lists what to load', plan.planRows === plan.slots.length && /Load/.test(plan.card));
+    ok('the plan says whether it fits the plate', /fits the Bambu Lab X1/.test(plan.card), plan.card);
+    ok('the plan estimates colour changes', /colour changes at 0.2 mm/.test(plan.card));
+    const colours4 = await meshColours();
+    ok('the preview shows the filament colours, not the wish list',
+      Object.entries(colours4).every(([id, c]) => c === plan.slots[plan.assign[id]]),
+      JSON.stringify(colours4));
+
+    await page.click('#filament-count [data-count="1"]');
+    const colours1 = await meshColours();
+    ok('one filament paints the whole model one colour', new Set(Object.values(colours1)).size === 1);
+    ok('a single-filament plan has no colour changes',
+      /No colour changes/.test((await planState()).card));
+
+    await page.click('#filament-count [data-count="12"]');
+    plan = await planState();
+    ok('"All" gives every layer on the plate its own spool',
+      plan.slots.length === new Set(Object.values(await meshColours())).size);
+
+    await page.selectOption('#printer-select', 'bambu-h2c');
+    plan = await planState();
+    ok('choosing the H2C plans for its seven hotends', plan.count === 7, `count ${plan.count}`);
+    ok('…and the plan names that plate', /Bambu Lab H2C plate/.test(plan.card));
+
+    await page.click('#filament-count [data-count="2"]');
+    plan = await planState();
+    const before2 = plan.slots.length;
+    await page.click('.layer-row[data-part="frame"] .slot-chip');
+    ok('a layer chip opens the filament menu', await page.locator('.slot-menu').isVisible());
+    await page.click('.slot-menu .slot-new');
+    plan = await planState();
+    ok('a layer can be given its own new filament', plan.slots.length === before2 + 1 && plan.manual,
+      `${plan.slots.length} slots, manual ${plan.manual}`);
+    ok('…in its own colour', (await meshColours()).frame === plan.slots[plan.assign.frame]);
+    const target = plan.assign.buildings;
+    await page.click('.layer-row[data-part="frame"] .slot-chip');
+    await page.click(`.slot-menu [role="menuitemradio"]:nth-of-type(${target + 1})`);
+    plan = await planState();
+    ok('moving it back drops the now-empty filament', plan.slots.length === before2 &&
+      plan.assign.frame === plan.assign.buildings, JSON.stringify(plan.assign));
+
+    await page.evaluate(() => {
+      const input = document.querySelector('.spool input[type="color"]');
+      input.value = '#123456';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    plan = await planState();
+    ok('recolouring a spool repaints its layers',
+      Object.entries(await meshColours()).filter(([id]) => plan.assign[id] === 0)
+        .every(([, c]) => c === '#123456'));
+
+    await page.hover('.plan-list li:first-child');
+    const faded = await page.evaluate(() => [...window.skylineForge.viewer.parts.values()]
+      .filter((m) => m.material.transparent).length);
+    ok('pointing at a filament fades the other layers', faded > 0, `${faded} faded`);
+    await page.mouse.move(5, 5);
+
+    const job = await page.evaluate(async () => {
+      const app = window.skylineForge;
+      const { buildExport } = await import('/js/export/index.js');
+      const { unzip } = await import('/js/data/import/unzip.js');
+      const { parts, plan: p } = app.printJob();
+      const { blob } = buildExport('3mf', parts, { title: 'Test', plateCentre: [175, 160] });
+      const files = await unzip(await blob.arrayBuffer());
+      const cfg = new TextDecoder().decode(files.get('Metadata/model_settings.config'));
+      const wanted = parts.map((x) => x.filament + 1);
+      const written = [...cfg.matchAll(/<part[^>]*>\s*<metadata key="name"[^>]*>\s*<metadata key="extruder" value="(\d+)"/g)]
+        .map((m) => Number(m[1]));
+      return { wanted, written, slots: p.slots.length };
+    });
+    ok('the 3MF puts every part on its planned filament',
+      job.written.length && job.written.join() === job.wanted.join(),
+      `${job.written} vs ${job.wanted}`);
+    ok('…numbered 1 to n with no gaps', Math.max(...job.written) === job.slots);
+
+    await page.selectOption('#printer-select', 'bambu-a1mini');
+    await page.evaluate(() => {
+      const app = window.skylineForge;
+      app.settings.size.printMm = 240;
+      app.syncUi();
+      app.onChange('geometry');
+    });
+    await page.waitForFunction(
+      () => !window.skylineForge.busy && window.skylineForge.model.stats.widthMm > 230,
+      { timeout: 60000 }
+    );
+    ok('an oversized print is flagged', await page.locator('#fit-plate-btn').isVisible());
+    await page.screenshot({ path: join(SHOTS, '02b-too-big.png') });
+    await page.click('#fit-plate-btn');
+    await page.waitForFunction(
+      () => !window.skylineForge.busy && window.skylineForge.model.stats.widthMm < 180,
+      { timeout: 60000 }
+    );
+    ok('"Shrink to fit" makes it fit the plate',
+      /fits the Bambu Lab A1 mini plate/.test((await planState()).card),
+      (await planState()).card);
+
+    await page.selectOption('#printer-select', 'bambu-x1');
+    await page.evaluate(() => {
+      const app = window.skylineForge;
+      app.settings.size.printMm = 160;
+      app.syncUi();
+      app.onChange('geometry');
+    });
+    await page.waitForTimeout(500);
+    await page.waitForFunction(() => !window.skylineForge.busy && window.skylineForge.model.stats.widthMm > 150);
+    await page.click('[data-palette="classic"]');
+
     console.log('\nLayer toggles');
     await page.evaluate(() => {
       const row = [...document.querySelectorAll('.layer-row')]
@@ -494,6 +626,23 @@ async function installStubs(page, osm) {
     ok('a share link round-trips every setting',
       restored.title === 'NEW YORK' && Math.abs(restored.lat - FIXTURE.lat) < 1e-6,
       `${restored.length} characters`);
+
+    const legacy = await page.evaluate(() => {
+      const app = window.skylineForge;
+      const old = JSON.parse(JSON.stringify(app.settings));
+      delete old.filaments;
+      delete old.printer;
+      const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(old))))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      const saved = location.hash;
+      location.hash = `s=${b64}`;
+      const loaded = app.loadSettings();
+      location.hash = saved;
+      return { count: loaded.filaments.count, printer: loaded.printer };
+    });
+    ok('links from before filament plans keep one colour per layer', legacy.count === 12,
+      `count ${legacy.count}`);
+    ok('…and open with this device\'s printer', legacy.printer === 'bambu-x1', legacy.printer);
 
     console.log('\nReload');
     await page.reload({ waitUntil: 'load' });
@@ -768,7 +917,7 @@ async function findChromium() {
       continue;
     }
     for (const entry of entries.filter((e) => e.startsWith('chromium'))) {
-      for (const candidate of ['chrome-linux/chrome', 'chrome-linux/headless_shell']) {
+      for (const candidate of ['chrome-linux/chrome', 'chrome-linux64/chrome', 'chrome-linux/headless_shell']) {
         const path = join(root, entry, candidate);
         try {
           await readFile(path, { flag: 'r' });
