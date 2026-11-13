@@ -350,6 +350,48 @@ console.log('\nRoofs');
   ok('skillion: watertight', openEdges(mesh) === 0, `${openEdges(mesh)} open edges`);
   near('skillion: volume is the wedge', mesh.volume(), 32, 0.05);
 
+  // An 8 × 4 hip: a 4 m ridge, two trapezoid slopes and two triangular
+  // ends. Volume = prism under the ridge + the two end pyramids' share.
+  mesh = new MeshBuilder('roofs');
+  wallTop = addRoof(mesh, house, 0, 10, { shape: 'hipped', heightM: 3 }, { metreScale: 1 });
+  near('hipped: walls stop below the ridge', wallTop, 7);
+  ok('hipped: watertight', openEdges(mesh) === 0, `${openEdges(mesh)} open edges`);
+  ok('hipped: no zero-area facets', noDegenerate(mesh));
+  near('hipped: volume is ridge prism plus hip ends', mesh.volume(), 40, 0.05);
+  near('hipped: ridge reaches full building height', mesh.bounds().maxZ, 10);
+  near('hipped: eaves sit on the wall top all round', mesh.bounds().minZ, 7);
+
+  mesh = new MeshBuilder('roofs');
+  wallTop = addRoof(mesh, rot, 0, 10, { shape: 'hipped', heightM: 3 }, { metreScale: 1 });
+  ok('hipped, rotated: watertight', wallTop === 7 && openEdges(mesh) === 0,
+    `${openEdges(mesh)} open edges`);
+  near('hipped, rotated: volume unchanged', mesh.volume(), 40, 0.05);
+
+  mesh = new MeshBuilder('roofs');
+  ok('hipped on an L-shape: built',
+    addRoof(mesh, ell, 0, 9, { shape: 'hipped' }, { metreScale: 1 }) !== null);
+  ok('hipped on an L-shape: watertight', openEdges(mesh) === 0,
+    `${openEdges(mesh)} open edges`);
+
+  // A measured roof carries its own frame: here the ridge sits 1 m off the
+  // outline's centre line, where the LiDAR found it.
+  mesh = new MeshBuilder('roofs');
+  const frame = { cx: 0, cy: 1, ux: 1, uy: 0, vx: 0, vy: 1, halfLength: 4, halfWidth: 1 };
+  wallTop = addRoof(mesh, house, 0, 10,
+    { shape: 'gabled', heightM: 3, frame, measured: true }, { metreScale: 1 });
+  ok('a measured frame moves the ridge', wallTop === 7 && openEdges(mesh) === 0);
+  near('…and the roof only covers the frame', mesh.volume(), 24, 0.05);
+
+  // A measured pyramid over a rectangle: apex over the centre, each pair
+  // of slopes at its own pitch. Volume = base × height / 3.
+  mesh = new MeshBuilder('roofs');
+  const whole = { cx: 0, cy: 0, ux: 1, uy: 0, vx: 0, vy: 1, halfLength: 4, halfWidth: 2 };
+  wallTop = addRoof(mesh, house, 0, 10,
+    { shape: 'pyramidal', heightM: 3, frame: whole, measured: true }, { metreScale: 1 });
+  ok('a measured pyramid is watertight', wallTop === 7 && openEdges(mesh) === 0,
+    `${openEdges(mesh)} open edges`);
+  near('…with the volume of a pyramid', mesh.volume(), 32, 0.05);
+
   const tower = [G.closeRing([[-3, -3], [3, -3], [3, 3], [-3, 3]])];
   mesh = new MeshBuilder('roofs');
   wallTop = addRoof(mesh, tower, 0, 12, { shape: 'pyramidal', heightM: 4 }, { metreScale: 1 });
@@ -377,8 +419,8 @@ console.log('\nRoofs');
   const { roofSpec } = await import('../js/model/tags.js');
   ok('building=house defaults to gabled',
     roofSpec({ building: 'house' })?.shape === 'gabled');
-  ok('roof:shape=hipped reads as a ridge',
-    roofSpec({ building: 'yes', 'roof:shape': 'hipped' })?.shape === 'gabled');
+  ok('roof:shape=hipped is a hip, not a gable',
+    roofSpec({ building: 'yes', 'roof:shape': 'hipped' })?.shape === 'hipped');
   ok('roof:shape=dome reads as a point',
     roofSpec({ building: 'commercial', 'roof:shape': 'dome' })?.shape === 'pyramidal');
   ok('roof:shape=flat stays flat', roofSpec({ building: 'house', 'roof:shape': 'flat' }) === null);

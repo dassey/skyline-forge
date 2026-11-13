@@ -74,6 +74,8 @@ export const DEFAULT_SETTINGS = {
     frameWidthMm: 4,
     splitMajorRoads: true,
     buildingDetail: 'simple',
+    lidarRoofs: true,
+    roofStyle: 'auto',
     maxTrees: 400,
     treeRadiusMm: 0.8,
     treeHeightMm: 2.4,

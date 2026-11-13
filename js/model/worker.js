@@ -2,11 +2,19 @@ import { buildModel } from './build.js';
 
 let currentJob = 0;
 
+// The LiDAR roof grid is megabytes; it is sent once per area and kept here
+// rather than copied with every rebuild.
+let roofs = { id: 0, grid: null };
+
 self.onmessage = (event) => {
   const { type, jobId, payload } = event.data || {};
 
   if (type === 'cancel') {
     currentJob++;
+    return;
+  }
+  if (type === 'roofs') {
+    roofs = { id: event.data.id, grid: event.data.grid };
     return;
   }
   if (type !== 'build') return;
@@ -25,6 +33,7 @@ self.onmessage = (event) => {
         ? { ...payload.heightGrid, values: new Float32Array(payload.heightGrid.values) }
         : null,
       routePoints: payload.routePoints,
+      roofGrid: payload.roofsId && payload.roofsId === roofs.id ? roofs.grid : null,
       font: payload.font,
       onProgress: (fraction, message) =>
         post({ type: 'progress', jobId, fraction, message }),

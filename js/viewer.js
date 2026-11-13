@@ -123,6 +123,10 @@ export class Viewer {
         roughness: 0.82,
         metalness: 0.0,
         flatShading: false,
+        // Parts are built from prisms that share walls. With the default
+        // (back faces cast shadows) a neighbour's hidden wall lies exactly
+        // on a lit one and speckles it black.
+        shadowSide: THREE.FrontSide,
       });
 
       const mesh = new THREE.Mesh(geometry, material);

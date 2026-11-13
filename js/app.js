@@ -6,6 +6,7 @@ import { Viewer } from './viewer.js';
 import * as geocode from './data/geocode.js';
 import * as overpass from './data/overpass.js';
 import * as elevation from './data/elevation.js';
+import * as lidar from './data/lidar.js';
 import * as routing from './data/route.js';
 import { FORMATS, buildExport, downloadBlob, slugify } from './export/index.js';
 import { ImportsPanel } from './imports-ui.js';
@@ -52,6 +53,7 @@ class App {
     this.busy = false;
 
     this.cache = { bbox: null, layers: [], detail: null, features: null };
+    this.roofs = { bbox: null, grid: null, id: 0 };
     this.imports = [];
     this.merged = null;
     this.exportFormat = '3mf';
@@ -918,11 +920,44 @@ class App {
         this.heightGrid = null;
       }
 
+      await this.ensureRoofs();
       await this.rebuild({ keepBusy: true, silent: opts.silent });
     } catch (err) {
       this.setBusy(false);
       this.status(err.message, 'bad');
       this.toast(err.message, 'bad');
+    }
+  }
+
+  // LiDAR roof heights for the plate, fetched once per area. Never fatal:
+  // without them buildings fall back to mapped or estimated heights.
+  async ensureRoofs() {
+    if (!this.settings.print.lidarRoofs) return;
+    const need = this.requiredBbox();
+    const have = this.roofs.bbox;
+    if (
+      have &&
+      need.minLat >= have.minLat && need.maxLat <= have.maxLat &&
+      need.minLon >= have.minLon && need.maxLon <= have.maxLon
+    ) {
+      return;
+    }
+    const bbox = padBbox(need, 0.12);
+    try {
+      const grid = await lidar.fetchRoofGrid(bbox, {
+        onProgress: (msg) => this.status(msg, 'busy'),
+      });
+      this.roofs = { bbox, grid, id: this.roofs.id + 1 };
+      if (grid) {
+        this.worker.postMessage({
+          type: 'roofs',
+          id: this.roofs.id,
+          grid: { ...grid, values: grid.values.slice() },
+        });
+      }
+    } catch (err) {
+      this.roofs = { bbox: null, grid: null, id: this.roofs.id + 1 };
+      this.toast(`LiDAR roofs unavailable (${err.message}) — using estimated heights.`, 'warn');
     }
   }
 
@@ -934,6 +969,8 @@ class App {
     }
     this._pendingRebuild = false;
     this.setBusy(true);
+
+    if (!opts.keepBusy) await this.ensureRoofs();
 
     if (this.settings.terrain.enabled && !this.heightGrid) {
       try {
@@ -964,6 +1001,7 @@ class App {
             ? { ...this.heightGrid, values: this.heightGrid.values.slice() }
             : null,
         routePoints: this.settings.layers.route ? this.settings.route.points : null,
+        roofsId: this.settings.print.lidarRoofs && this.roofs.grid ? this.roofs.id : 0,
         font: this.font,
       },
     });
@@ -1003,15 +1041,47 @@ class App {
     if (this.isNarrow() && !this._silentJob) this.showPane('model');
 
     const { stats, warnings } = msg.result;
+    const roofs = stats.roofs?.measured
+      ? `${stats.roofs.measured.toLocaleString()} measured by LiDAR` +
+        `${stats.roofs.source?.year ? ` (${stats.roofs.source.year})` : ''} · `
+      : '';
     this.status(
-      `${stats.buildingCount.toLocaleString()} buildings · ` +
+      `${stats.buildingCount.toLocaleString()} buildings · ${roofs}` +
         `${stats.triangles.toLocaleString()} triangles · built in ${(stats.elapsedMs / 1000).toFixed(1)}s`,
       'good'
     );
+    this.renderRoofNote(stats);
     if (!this._silentJob) {
       for (const w of warnings.slice(0, 3)) this.toast(w, 'warn');
     }
     if (this._pendingRebuild) this.rebuild();
+  }
+
+  // Say where the building shapes came from, under the LiDAR switch.
+  renderRoofNote(stats) {
+    const note = this.el['roof-note'];
+    if (!note) return;
+    const on = this.settings.print.lidarRoofs;
+    const r = stats.roofs;
+    if (!on) {
+      note.textContent = 'Off — heights come from the map, or a guess from the building type.';
+    } else if (r?.measured) {
+      const kinds = r.shapes || {};
+      const pitched = (kinds.gabled || 0) + (kinds.hipped || 0) + (kinds.pyramidal || 0) + (kinds.skillion || 0);
+      const parts = [
+        pitched ? `${pitched.toLocaleString()} pitched roofs` : '',
+        kinds.flat ? `${kinds.flat.toLocaleString()} flat` : '',
+        kinds.surface ? `${kinds.surface.toLocaleString()} built from the measured roof` : '',
+        r.moved ? `${r.moved.toLocaleString()} outlines moved onto the building` : '',
+      ].filter(Boolean);
+      note.textContent =
+        `${r.measured.toLocaleString()} buildings measured` +
+        `${r.source?.year ? ` from the ${r.source.year} USGS survey` : ''}: ${parts.join(', ')}.`;
+    } else if (this.roofs.bbox && !this.roofs.grid) {
+      note.textContent = 'No LiDAR roof survey is published for this area yet — using estimated heights.';
+    } else {
+      note.textContent = 'Measures each building from the USGS 3DEP LiDAR survey. United States only.';
+    }
   }
 
   applyLayerVisibility() {

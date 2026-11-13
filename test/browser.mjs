@@ -4,6 +4,7 @@ import { readFile, mkdir, readdir } from 'node:fs/promises';
 import { extname, join, normalize, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { syntheticCity } from './fixture-city.mjs';
+import { terrariumPng } from './fixture-lidar.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
@@ -83,7 +84,35 @@ function encodePolyline(points, precision = 6) {
 }
 
 async function installStubs(page, osm) {
-  const seen = { overpass: 0, elevation: 0, route: 0, geocode: 0, nominatimSearch: 0 };
+  const seen = {
+    overpass: 0, elevation: 0, route: 0, geocode: 0, nominatimSearch: 0,
+    lidarSearch: 0, lidarTiles: 0,
+    // No LiDAR survey until a test switches one on: everything stands this
+    // many metres above the ground.
+    lidarHeight: 0,
+  };
+
+  await page.route('**://planetarycomputer.microsoft.com/**', (route) => {
+    const url = route.request().url();
+    if (url.includes('/stac/')) {
+      seen.lidarSearch++;
+      const when = { '3dep:usgs_id': 'TEST_2021', end_datetime: '2021-04-01T00:00:00Z' };
+      const features = seen.lidarHeight
+        ? [
+            { id: 'TEST_2021-dsm-2m-1-1', properties: when },
+            { id: 'TEST_2021-dtm-2m-1-1', properties: when },
+          ]
+        : [];
+      return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ features }) });
+    }
+    seen.lidarTiles++;
+    const [, w, h] = url.match(/\/(\d+)x(\d+)\.png/);
+    const cols = Number(w);
+    const rows = Number(h);
+    const level = url.includes('3dep-lidar-dsm') ? 40 + seen.lidarHeight : 40;
+    const values = new Float32Array(cols * rows).fill(level);
+    return route.fulfill({ contentType: 'image/png', body: Buffer.from(terrariumPng(values, cols, rows)) });
+  });
 
   await page.route('**://*/api/interpreter', (route) => {
     seen.overpass++;
@@ -494,6 +523,91 @@ async function installStubs(page, osm) {
     await page.waitForTimeout(500);
     await page.waitForFunction(() => !window.skylineForge.busy && window.skylineForge.model.stats.widthMm > 150);
     await page.click('[data-palette="classic"]');
+
+    console.log('\nLiDAR roofs');
+    const roofState = () => page.evaluate(() => ({
+      status: document.getElementById('status-text').textContent,
+      note: document.getElementById('roof-note').textContent,
+      roofs: window.skylineForge.model.stats.roofs,
+      on: window.skylineForge.settings.print.lidarRoofs,
+      checked: document.querySelector('[data-bind="print.lidarRoofs"]').checked,
+      style: document.querySelector('[data-bind="print.roofStyle"]').value,
+    }));
+    let roofsNow = await roofState();
+    ok('real roofs are on for a new visitor', roofsNow.on && roofsNow.checked);
+    ok('the survey catalogue was asked about this area', seen.lidarSearch > 0, `${seen.lidarSearch} searches`);
+    ok('with no survey the model is built from the map alone', roofsNow.roofs === null &&
+      !/LiDAR/.test(roofsNow.status), roofsNow.status);
+    ok('…and the panel says so', /No LiDAR roof survey/.test(roofsNow.note), roofsNow.note);
+    ok('house roofs follow the region by default', roofsNow.style === 'auto');
+
+    // Now there is a survey: everything stands 31 m tall. An area already
+    // looked up is not asked about again, so nudge the plate size to make
+    // it a new one.
+    seen.lidarHeight = 31;
+    await page.evaluate(() => {
+      const app = window.skylineForge;
+      app.roofs = { bbox: null, grid: null, id: app.roofs.id };
+      app.settings.size.areaMetres += 40;
+      app.picker.update(app.settings);
+      app.syncUi();
+      app.onChange('geometry');
+    });
+    await page.waitForFunction(
+      () => !window.skylineForge.busy && window.skylineForge.model.stats.roofs?.measured > 0,
+      { timeout: 120000 }
+    );
+    roofsNow = await roofState();
+    ok('surface and terrain tiles were downloaded', seen.lidarTiles === 2, `${seen.lidarTiles} tiles`);
+    ok('buildings are measured from the survey', roofsNow.roofs.measured > 20,
+      `${roofsNow.roofs.measured} measured`);
+    ok('the status line credits it', /measured by LiDAR \(2021\)/.test(roofsNow.status), roofsNow.status);
+    ok('the panel reports what was found', /buildings measured from the 2021 USGS survey/.test(roofsNow.note),
+      roofsNow.note);
+    ok('a level survey gives level roofs', roofsNow.roofs.shapes.flat === roofsNow.roofs.measured,
+      JSON.stringify(roofsNow.roofs.shapes));
+
+    const tilesBefore = seen.lidarTiles;
+    await page.evaluate(() => {
+      const app = window.skylineForge;
+      app.settings.heights.buildingScale = 1.4;
+      app.syncUi();
+      app.onChange('geometry');
+    });
+    await page.waitForTimeout(600);
+    await page.waitForFunction(() => !window.skylineForge.busy);
+    ok('a rebuild reuses the survey already downloaded', seen.lidarTiles === tilesBefore);
+
+    await page.evaluate(() => {
+      document.querySelector('[data-panel="print"]').setAttribute('open', '');
+    });
+    await page.click('[data-bind="print.lidarRoofs"]');
+    await page.waitForTimeout(600);
+    await page.waitForFunction(() => !window.skylineForge.busy);
+    roofsNow = await roofState();
+    ok('switching it off goes back to the map', roofsNow.roofs === null && !roofsNow.on &&
+      /^Off/.test(roofsNow.note), roofsNow.note);
+    await page.selectOption('[data-bind="print.roofStyle"]', 'hipped');
+    await page.waitForTimeout(600);
+    await page.waitForFunction(() => !window.skylineForge.busy);
+    ok('the house roof style can be set by hand', await page.evaluate(() =>
+      window.skylineForge.settings.print.roofStyle === 'hipped'));
+    await page.screenshot({ path: join(SHOTS, '02c-roofs.png') });
+
+    seen.lidarHeight = 0;
+    await page.evaluate(() => {
+      const app = window.skylineForge;
+      app.roofs = { bbox: null, grid: null, id: app.roofs.id };
+      app.settings.size.areaMetres -= 40;
+      app.settings.heights.buildingScale = 1;
+      app.settings.print.lidarRoofs = true;
+      app.settings.print.roofStyle = 'auto';
+      app.picker.update(app.settings);
+      app.syncUi();
+      app.onChange('geometry');
+    });
+    await page.waitForTimeout(600);
+    await page.waitForFunction(() => !window.skylineForge.busy);
 
     console.log('\nLayer toggles');
     await page.evaluate(() => {

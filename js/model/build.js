@@ -12,6 +12,7 @@ import { makeSampler } from '../data/elevation.js';
 import { seaFromCoastline } from './coastline.js';
 import { layoutText } from './text.js';
 import { PARTS } from './parts.js';
+import { makeRoofSampler, scanBuilding, regionalRoofStyle, fieldSampler } from './roofscan.js';
 import * as T from './tags.js';
 
 function featureToMultiPolygon(feature, toMm) {
@@ -138,6 +139,184 @@ function dropNestedBuildings(shapes) {
   return removed.size;
 }
 
+// Put a house outline where the LiDAR found the house: slide it over, and
+// cut it down to the roof when the outline is clearly too big.
+function snapOutline(poly, snap) {
+  let moved = poly;
+  if (snap.dx || snap.dy) {
+    moved = poly.map((ring) => ring.map(([x, y]) => [x + snap.dx, y + snap.dy]));
+  }
+  if (!snap.clip) return moved;
+  const { cx, cy, ux, uy, vx, vy, halfLength: L, halfWidth: W } = snap.clip;
+  const at = (u, v) => [cx + ux * u + vx * v, cy + uy * u + vy * v];
+  const rect = [[[at(-L, -W), at(L, -W), at(L, W), at(-L, W), at(-L, -W)]]];
+  const pieces = G.intersection([moved], rect);
+  if (!pieces.length) return moved;
+  let best = pieces[0];
+  for (const piece of pieces) {
+    if (Math.abs(G.ringArea(piece[0])) > Math.abs(G.ringArea(best[0]))) best = piece;
+  }
+  return best;
+}
+
+// Build a large building from the roof the survey measured, as terraces:
+// neighbouring cells within `tol` of each other become one level roof at
+// their median height, with a vertical step to the next. That is how such
+// buildings are actually shaped (a tower on a podium, a penthouse on a
+// slab) and it is far cheaper than draping every cell. The grid is turned
+// to the building's own axes so the steps run square to its walls, and the
+// outer walls stay exactly on the outline.
+function terraceSurface(mesh, poly, frame, cell, tol, heightAt) {
+  const { cx, cy, ux, uy, vx, vy } = frame;
+  const toLocal = ([x, y]) => [(x - cx) * ux + (y - cy) * uy, (x - cx) * vx + (y - cy) * vy];
+  const toWorld = ([u, v]) => [cx + u * ux + v * vx, cy + u * uy + v * vy];
+  const local = poly.map((ring) => ring.map(toLocal));
+  const cover = G.gridCover(local, cell);
+  const { c0, r0, cols, rows, state } = cover;
+  const count = cols * rows;
+
+  const z = new Float32Array(count);
+  const order = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const i = r * cols + c;
+      if (!state[i]) continue;
+      const [x, y] = toWorld([(c0 + c + 0.5) * cell, (r0 + r + 0.5) * cell]);
+      z[i] = heightAt(x, y);
+      order.push(i);
+    }
+  }
+  if (!order.length) return false;
+
+  // Start regions from the calmest cells, so each level roof grows out
+  // from its middle rather than from the step at its edge.
+  const rough = new Float32Array(count);
+  for (const i of order) {
+    const r = (i / cols) | 0;
+    const c = i - r * cols;
+    let lo = z[i];
+    let hi = z[i];
+    for (const [dr, dc] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) {
+      const rr = r + dr;
+      const cc = c + dc;
+      if (rr < 0 || cc < 0 || rr >= rows || cc >= cols || !state[rr * cols + cc]) continue;
+      const h = z[rr * cols + cc];
+      if (h < lo) lo = h;
+      if (h > hi) hi = h;
+    }
+    rough[i] = hi - lo;
+  }
+  order.sort((a, b) => rough[a] - rough[b] || a - b);
+
+  const region = new Int32Array(count).fill(-1);
+  const levels = [];
+  const stack = [];
+  for (const seed of order) {
+    if (region[seed] >= 0) continue;
+    const id = levels.length;
+    const base = z[seed];
+    const members = [];
+    region[seed] = id;
+    stack.push(seed);
+    while (stack.length) {
+      const i = stack.pop();
+      members.push(z[i]);
+      const r = (i / cols) | 0;
+      const c = i - r * cols;
+      for (const [dr, dc] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) {
+        const rr = r + dr;
+        const cc = c + dc;
+        if (rr < 0 || cc < 0 || rr >= rows || cc >= cols) continue;
+        const j = rr * cols + cc;
+        if (!state[j] || region[j] >= 0 || Math.abs(z[j] - base) > tol) continue;
+        region[j] = id;
+        stack.push(j);
+      }
+    }
+    members.sort((a, b) => a - b);
+    levels.push(Math.round(members[members.length >> 1] * 20) / 20);
+  }
+
+  // The survey smears every step over a cell or two, which shows up as
+  // slivers of in-between height along each wall, and a lone raised cell
+  // is an antenna or noise. A real roof is at least three cells across
+  // somewhere; anything thinner is folded, cell by cell, into whichever
+  // neighbouring roof is nearest in height. That puts each wall where the
+  // smeared edge passes half way, which is where the wall really is.
+  const solid = new Uint8Array(levels.length);
+  for (let r = 1; r < rows - 1; r++) {
+    for (let c = 1; c < cols - 1; c++) {
+      const i = r * cols + c;
+      if (!state[i] || solid[region[i]]) continue;
+      const id = region[i];
+      let block = true;
+      for (let dr = -1; dr <= 1 && block; dr++) {
+        for (let dc = -1; dc <= 1 && block; dc++) {
+          const j = (r + dr) * cols + c + dc;
+          if (!state[j] || region[j] !== id) block = false;
+        }
+      }
+      if (block) solid[id] = 1;
+    }
+  }
+  if (solid.some(Boolean)) {
+    let loose = order.filter((i) => !solid[region[i]]);
+    for (let pass = 0; loose.length && pass < cols + rows; pass++) {
+      const moves = [];
+      const waiting = [];
+      for (const i of loose) {
+        const r = (i / cols) | 0;
+        const c = i - r * cols;
+        let best = -1;
+        for (const [dr, dc] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) {
+          const rr = r + dr;
+          const cc = c + dc;
+          if (rr < 0 || cc < 0 || rr >= rows || cc >= cols) continue;
+          const j = rr * cols + cc;
+          if (!state[j] || !solid[region[j]]) continue;
+          if (best < 0 || Math.abs(levels[region[j]] - z[i]) < Math.abs(levels[best] - z[i])) best = region[j];
+        }
+        if (best >= 0) moves.push([i, best]);
+        else waiting.push(i);
+      }
+      if (!moves.length) break;
+      for (const [i, id] of moves) region[i] = id;
+      loose = waiting;
+    }
+  }
+
+  // Each region as the fewest rectangles, clipped to the outline where
+  // they reach it.
+  const done = new Uint8Array(count);
+  let built = 0;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const i = r * cols + c;
+      if (!state[i] || done[i]) continue;
+      const id = region[i];
+      let c2 = c;
+      while (c2 + 1 < cols && !done[r * cols + c2 + 1] && state[r * cols + c2 + 1] && region[r * cols + c2 + 1] === id) c2++;
+      let r2 = r;
+      for (;;) {
+        if (r2 + 1 >= rows) break;
+        let whole = true;
+        for (let cc = c; cc <= c2 && whole; cc++) {
+          const j = (r2 + 1) * cols + cc;
+          if (done[j] || !state[j] || region[j] !== id) whole = false;
+        }
+        if (!whole) break;
+        r2++;
+      }
+      for (let rr = r; rr <= r2; rr++) for (let cc = c; cc <= c2; cc++) done[rr * cols + cc] = 1;
+      for (const piece of G.gridBlock(local, cover, c, r, c2, r2)) {
+        const world = piece.map((ring) => ring.map(toWorld));
+        if (extrudePolygon(mesh, world, 0, levels[id])) built++;
+      }
+    }
+  }
+  return built > 0;
+}
+
 function centroidOf(ring) {
   let x = 0;
   let y = 0;
@@ -250,6 +429,20 @@ export function buildModel(features, s, ctx = {}) {
 
   report(0.08, 'Reading buildings…');
 
+  // With a LiDAR survey to hand, each building is measured instead of
+  // guessed: its height, its roof, and for houses where it really stands.
+  // Mapped heights and roof shapes still win where someone has surveyed
+  // them by hand.
+  const roofSample = ctx.roofGrid ? makeRoofSampler(ctx.roofGrid, proj, mmPerMetre) : null;
+  const roofStats = { measured: 0, absent: 0, moved: 0, shapes: {} };
+
+  // Gable or hip for houses nobody has mapped a roof for. No survey at this
+  // resolution can tell the two apart, so it follows the region unless the
+  // user picks one.
+  const houseRoof = s.print.roofStyle === 'gabled' || s.print.roofStyle === 'hipped'
+    ? s.print.roofStyle
+    : regionalRoofStyle(s.location.lat, s.location.lon);
+
   const buildingShapes = [];
   if (s.layers.buildings) {
     for (const f of features.buildings) {
@@ -257,14 +450,56 @@ export function buildModel(features, s, ctx = {}) {
       if (T.isUnderground(f.tags)) continue;
       const mp = featureToMultiPolygon(f, toMm);
       if (!mp.length) continue;
-      const heightM = T.buildingHeight(f.tags);
-      for (const poly of mp) {
-        const box = bboxOfRing(poly[0]);
+      const tagged = T.hasMeasuredHeight(f.tags);
+      for (let poly of mp) {
+        let box = bboxOfRing(poly[0]);
         if (!inPlate(box)) continue;
+
+        const scan = roofSample && !f.tags['building:part']
+          ? scanBuilding(poly, roofSample, mmPerMetre)
+          : null;
+        if (scan?.kind === 'absent') roofStats.absent++;
+        const measured = scan && scan.kind !== 'absent' ? scan : null;
+        if (measured?.snap) {
+          poly = snapOutline(poly, measured.snap);
+          box = bboxOfRing(poly[0]);
+          roofStats.moved++;
+        }
+
+        const heightM = measured && !tagged ? measured.heightM : T.buildingHeight(f.tags);
         const areaM2 =
           Math.abs(G.ringArea(poly[0])) / (mmPerMetre * mmPerMetre);
-        const roof = T.roofSpec(f.tags, { areaM2, heightM });
-        buildingShapes.push({ poly, box, heightM, roof, tags: f.tags });
+        let roof = T.roofSpec(f.tags, { areaM2, heightM, style: houseRoof });
+        let surface = null;
+        if (measured) {
+          roofStats.measured++;
+          let shape = measured.kind;
+          if (!f.tags['roof:shape']) {
+            if (measured.kind === 'flat') {
+              roof = null;
+            } else if (measured.kind === 'surface') {
+              roof = null;
+              surface = measured;
+            } else {
+              shape = measured.kind === 'pitched' ? houseRoof : measured.kind;
+              roof = {
+                shape,
+                heightM: measured.riseM,
+                orientation: measured.orientation,
+                directionDeg: measured.directionDeg ?? null,
+                frame: measured.frame,
+                measured: true,
+              };
+            }
+          } else if (roof) {
+            // A mapped roof shape, on the building the survey located.
+            shape = roof.shape;
+            roof = { ...roof, frame: measured.frame, measured: true };
+            if (roof.heightM == null && measured.riseM > 0) roof.heightM = measured.riseM;
+          }
+          roofStats.shapes[shape] = (roofStats.shapes[shape] || 0) + 1;
+        }
+        buildingShapes.push({ poly, box, heightM, roof, surface, tags: f.tags });
       }
     }
   }
@@ -509,7 +744,7 @@ export function buildModel(features, s, ctx = {}) {
         minArea
       );
       if (!poly.length) continue;
-      buildingsPlaced.push({ mp: poly, heightM: b.heightM, roof: b.roof });
+      buildingsPlaced.push({ mp: poly, heightM: b.heightM, roof: b.roof, surface: b.surface });
     }
 
     const allFootprints = [];
@@ -592,12 +827,33 @@ export function buildModel(features, s, ctx = {}) {
     const scale = mmPerMetre * s.heights.buildingScale;
     const roofsOn = s.layers.roofs !== false;
     const roofOpts = { metreScale: scale, minRoofMm: 0.2, minHalfWidthMm: 0.35 };
+    const clampH = (mm) => Math.min(Math.max(mm, s.heights.buildingMin), s.heights.buildingMax);
+    // Terraces are cut no finer than the survey resolves or a nozzle can
+    // print, and a step has to be worth a layer or two to be kept.
+    const surfaceCell = Math.max(0.5, Math.min(1.6, 2 * mmPerMetre));
+    const surfaceTol = Math.max(0.25, 1.0 * scale);
     for (const b of buildingsPlaced) {
-      const raw = b.heightM * scale;
-      const h = Math.min(Math.max(raw, s.heights.buildingMin), s.heights.buildingMax);
+      const h = clampH(b.heightM * scale);
       for (const poly of b.mp) {
         const [cx, cy] = centroidOf(poly[0]);
         const z0 = baseTop(cx, cy);
+
+        if (b.surface) {
+          // The measured roof itself: one mass, setbacks and all.
+          const at = fieldSampler(b.surface.field);
+          const top = (x, y) => z0 + clampH(at(x, y) * scale);
+          const eave = z0 + clampH(b.surface.eaveM * scale);
+          const relief = z0 + h - eave;
+          if (relief < 0.2) {
+            extrudePolygon(mesh, poly, 0, z0 + h);
+            continue;
+          }
+          if (!terraceSurface(mesh, poly, b.surface.frame, surfaceCell, surfaceTol, top)) {
+            extrudePolygon(mesh, poly, 0, z0 + h);
+          }
+          continue;
+        }
+
         const wallTop =
           roofsOn && b.roof
             ? addRoof(meshFor('roofs'), poly, z0, h, b.roof, roofOpts)
@@ -749,6 +1005,7 @@ export function buildModel(features, s, ctx = {}) {
       regionAreas,
       scaleDenominator: Math.round(1 / mmPerMetre * 1000),
       mmPerMetre,
+      roofs: roofSample ? { ...roofStats, source: ctx.roofGrid.source || null } : null,
       elapsedMs: Date.now() - t0,
       terrainRelief: ctx.heightGrid
         ? ctx.heightGrid.max - ctx.heightGrid.min

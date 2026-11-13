@@ -621,3 +621,93 @@ export function gridSplit(mp, cellSize, bounds) {
   }
   return out.length ? out : mp;
 }
+
+// Lay a grid of `cell`-sized squares over one polygon and say, for each
+// square, whether it is outside (0), wholly inside (1) or crossed by the
+// boundary (2). The grid is anchored at the origin so neighbouring
+// buildings share cell lines.
+export function gridCover(poly, cell) {
+  const outer = poly[0];
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [x, y] of outer) {
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  const c0 = Math.floor(minX / cell);
+  const r0 = Math.floor(minY / cell);
+  const cols = Math.max(1, Math.ceil(maxX / cell) - c0);
+  const rows = Math.max(1, Math.ceil(maxY / cell) - r0);
+  const state = new Uint8Array(cols * rows);
+
+  // Every cell a boundary edge touches, by walking each edge through the
+  // grid in steps of a quarter cell.
+  const mark = (c, r) => {
+    if (c >= 0 && r >= 0 && c < cols && r < rows) state[r * cols + c] = 2;
+  };
+  for (const ring of poly) {
+    for (let i = 0; i < ring.length - 1; i++) {
+      const ax = ring[i][0] / cell - c0;
+      const ay = ring[i][1] / cell - r0;
+      const bx = ring[i + 1][0] / cell - c0;
+      const by = ring[i + 1][1] / cell - r0;
+      const steps = Math.max(1, Math.ceil(Math.max(Math.abs(bx - ax), Math.abs(by - ay)) * 4));
+      for (let k = 0; k <= steps; k++) {
+        const x = ax + ((bx - ax) * k) / steps;
+        const y = ay + ((by - ay) * k) / steps;
+        const c = Math.floor(x);
+        const r = Math.floor(y);
+        // A point on a cell line belongs to the cells on both sides.
+        const cc = x - c < 1e-9 ? [c - 1, c] : [c];
+        const rr = y - r < 1e-9 ? [r - 1, r] : [r];
+        for (const ci of cc) for (const ri of rr) mark(ci, ri);
+      }
+    }
+  }
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (state[r * cols + c]) continue;
+      const mid = [(c0 + c + 0.5) * cell, (r0 + r + 0.5) * cell];
+      if (!pointInRing(mid, outer)) continue;
+      let hole = false;
+      for (let h = 1; h < poly.length && !hole; h++) hole = pointInRing(mid, poly[h]);
+      if (!hole) state[r * cols + c] = 1;
+    }
+  }
+  return { c0, r0, cols, rows, cell, state };
+}
+
+// The polygon's share of a block of grid cells: the block itself when
+// every cell in it is wholly inside, otherwise the block clipped to the
+// polygon.
+export function gridBlock(poly, cover, c, r, c2, r2) {
+  const { c0, r0, cols, cell, state } = cover;
+  const x0 = (c0 + c) * cell;
+  const y0 = (r0 + r) * cell;
+  const x1 = (c0 + c2 + 1) * cell;
+  const y1 = (r0 + r2 + 1) * cell;
+  const square = [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]];
+  for (let rr = r; rr <= r2; rr++) {
+    for (let cc = c; cc <= c2; cc++) {
+      if (state[rr * cols + cc] !== 1) return intersection([poly], [[square]]);
+    }
+  }
+  return [[square]];
+}
+
+// Cut one polygon into grid cells no larger than `cell`, so a surface can
+// be draped over it vertex by vertex.
+export function sliceToGrid(poly, cell) {
+  const cover = gridCover(poly, cell);
+  if (cover.cols * cover.rows === 1) return [poly];
+  const out = [];
+  for (let r = 0; r < cover.rows; r++) {
+    for (let c = 0; c < cover.cols; c++) {
+      if (!cover.state[r * cover.cols + c]) continue;
+      for (const piece of gridBlock(poly, cover, c, r, c, r)) out.push(piece);
+    }
+  }
+  return out;
+}

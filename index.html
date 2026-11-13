@@ -239,6 +239,19 @@
           <input type="range" data-bind="heights.buildingMax" min="5" max="150" step="1">
         </label>
         <label class="check">
+          <input type="checkbox" data-bind="print.lidarRoofs">
+          <span>Real roofs and heights from LiDAR</span>
+        </label>
+        <p class="hint" id="roof-note">Measures each building from the USGS 3DEP LiDAR survey. United States only.</p>
+        <label class="field">
+          <span class="field-label">House roofs</span>
+          <select class="select" data-bind="print.roofStyle" aria-label="House roof style">
+            <option value="auto">Auto — by region</option>
+            <option value="gabled">Gabled</option>
+            <option value="hipped">Hipped</option>
+          </select>
+        </label>
+        <label class="check">
           <input type="checkbox" id="building-parts" data-kind="data">
           <span>Detailed building parts (landmarks)</span>
         </label>
@@ -347,6 +360,7 @@
 
     <footer class="sidebar-foot">
       Map data © <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors.
+      Roofs from <a href="https://www.usgs.gov/3d-elevation-program" target="_blank" rel="noopener">USGS 3DEP</a> LiDAR.
       Elevation by <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo</a>.
       Routing by <a href="https://valhalla.readthedocs.io/" target="_blank" rel="noopener">Valhalla</a>.
     </footer>
@@ -439,10 +453,31 @@
       <code>.prj</code> in the ZIP and it will be reprojected; without one the
       upload is refused rather than dropped in the wrong hemisphere.</p>
 
-      <h3>5. Buildings are estimates</h3>
-      <p>OpenStreetMap knows exact heights for some buildings and level counts for many more.
-      Where it knows nothing, height is inferred from the building type. Use
-      <strong>Height scale</strong> to push the skyline up if it reads flat.</p>
+      <h3>5. Buildings are measured, where there is a survey</h3>
+      <p>Most US building outlines carry no height at all, which is why an unmeasured
+      map prints as rows of identical boxes. With <strong>Real roofs and heights from
+      LiDAR</strong> switched on (Print tuning → Buildings), every building is checked
+      against the USGS 3DEP airborne laser survey instead:</p>
+      <ul>
+        <li><strong>Large buildings</strong> are built from the roof the survey measured,
+        as level terraces with crisp steps — a tower gets its podium and setbacks, a
+        warehouse its real height.</li>
+        <li><strong>Houses</strong> get their measured ridge height, the direction the
+        ridge really runs, and a pitch taken from the survey. Outlines traced from
+        aerial imagery are often a few metres off or too big; they are moved onto the
+        building and trimmed to it.</li>
+        <li><strong>Flat roofs stay flat</strong>, and anything the survey shows as bare
+        ground is left at its mapped height, since it may have been built since.</li>
+      </ul>
+      <p>What the survey cannot do, at 2 m resolution, is tell a gabled house roof
+      from a hipped one. That follows the region — hips across the South and
+      Southwest, gables elsewhere — and you can set it yourself under
+      <strong>House roofs</strong>. Heights and roof shapes a mapper recorded by hand
+      always win over the survey.</p>
+      <p>Coverage is most, not all, of the country, and surveys are a few years old.
+      Where there is none, heights fall back to the map, then to a guess from the
+      building type; use <strong>Height scale</strong> to push the skyline up if it
+      reads flat, or bring your own footprints with real heights.</p>
 
       <h3>6. Printing notes</h3>
       <ul>
@@ -465,13 +500,16 @@
       STL bundle, where each file is separately closed.</p>
 
       <h3>Where the data comes from</h3>
-      <p>Buildings, roads, water and parks come from OpenStreetMap via Overpass. Elevation is
-      Copernicus DEM through Open-Meteo. Routing is Valhalla. Nothing is uploaded anywhere —
-      the model is built in your browser.</p>
+      <p>Buildings, roads, water and parks come from OpenStreetMap via Overpass. Building
+      heights and roofs come from the USGS 3D Elevation Program's LiDAR, served by
+      Microsoft Planetary Computer. Elevation is Copernicus DEM through Open-Meteo. Routing
+      is Valhalla. Nothing is uploaded anywhere — the model is built in your browser.</p>
 
       <h3>Known limits</h3>
       <ul>
         <li>Coverage is only as good as OSM in that neighbourhood.</li>
+        <li>LiDAR roofs cover most of the US but not all of it, at 2 m resolution: enough
+        for heights, setbacks and ridge directions, not for dormers or chimneys.</li>
         <li>Bridges print as solid roadbed, not as spans.</li>
         <li>Terrain is 90 m resolution, so it captures hills rather than kerbs.</li>
         <li>Very large areas can hit the public Overpass rate limits — wait a minute and retry.</li>

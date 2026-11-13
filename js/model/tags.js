@@ -58,6 +58,16 @@ const DEFAULT_HEIGHTS = {
   kiosk: 3,
 };
 
+// True when a mapper recorded the height or storey count, rather than
+// leaving it to be guessed from the building type.
+export function hasMeasuredHeight(tags) {
+  return Boolean(
+    parseLength(tags.height) ||
+      parseLength(tags['building:height']) ||
+      parseFloat(tags['building:levels']) > 0
+  );
+}
+
 export function buildingHeight(tags, fallback = 9) {
   const explicit =
     parseLength(tags.height) ??
@@ -83,7 +93,7 @@ export function buildingHeight(tags, fallback = 9) {
 
 const ROOF_SHAPES = {
   gabled: 'gabled',
-  hipped: 'gabled',
+  hipped: 'hipped',
   half_hipped: 'gabled',
   'half-hipped': 'gabled',
   gambrel: 'gabled',
@@ -136,13 +146,16 @@ function parseDirection(value) {
 export function roofSpec(tags, ctx = {}) {
   let shape = ROOF_SHAPES[tags['roof:shape']] ?? null;
   if (!shape) {
+    // Unmapped houses take the caller's style: gables in most of the
+    // country, hips in the South.
+    const pitched = ctx.style === 'hipped' ? 'hipped' : 'gabled';
     const kind = tags.building || tags['building:part'];
     if (kind && GABLED_BY_DEFAULT.has(kind)) {
-      shape = 'gabled';
+      shape = pitched;
     } else if (kind === 'yes' || kind === 'residential') {
       const area = ctx.areaM2 ?? 0;
       const tall = (ctx.heightM ?? 99) > 12;
-      if (area > 25 && area <= 400 && !tall) shape = 'gabled';
+      if (area > 25 && area <= 400 && !tall) shape = pitched;
     }
   }
   if (!shape || shape === 'flat') return null;
